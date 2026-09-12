@@ -1,0 +1,251 @@
+openapi: 3.1.0
+info:
+  title: Northstar Health Payer API (MOCK)
+  version: 1.0.0
+  summary: Fake payer API for the Reclaim demo. Not a real payer, not a standard.
+  description: |
+    SYNTHETIC / MOCK CONTRACT. Northstar Health is a fictional payer.
+
+    No HIPAA-adopted or HL7 standard exists for electronic claim appeals; CMS-0053-F explicitly
+    excludes attachments exchanged as part of a claims appeal. Real submission happens through
+    payer portals, fax/mail, vendor tools, or esMD (Medicare only). Each production payer gets its
+    own `PayerAdapter` implementation.
+
+    To stay production-shaped, the appeal payload borrows field names from the Da Vinci CDex
+    `$submit-attachment` operation (TrackingId, AttachTo, PayerId, MemberId, ServiceDate) and
+    reports status with FHIR Task status codes. The Idempotency-Key header follows the expired
+    IETF draft `draft-ietf-httpapi-idempotency-key-header-07` plus Stripe-style storage; it is our
+    own addition, not a payer requirement.
+
+    Mounted in-process at `/mock/northstar/api/v1`; the demo narrative calls it
+    `https://mock-northstar-health.example/api/v1`.
+servers:
+  - url: http://127.0.0.1:8000/mock/northstar/api/v1
+    description: In-process mock (default, reached through httpx ASGI transport)
+security:
+  - bearer: []
+paths:
+  /claims/{payerClaimId}/decision:
+    get:
+      operationId: getClaimDecision
+      parameters:
+        - $ref: '#/components/parameters/PayerClaimId'
+      responses:
+        '200':
+          description: Adjudication decision for the claim
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClaimDecision' }
+              example:
+                payerClaimId: PAYER-CLM-99281
+                claimId: HSP-CLM-100028
+                decision: denied
+                reasonCode: CO-50
+                reasonText: Insufficient documentation of medical necessity
+                appealDeadline: '2026-10-19'
+                allowedSubmissionChannels: [portal, fax]
+                letter:
+                  documentId: denial-letter-99281
+                  url: /api/v1/documents/denial-letter-99281
+                synthetic: true
+        '401': { $ref: '#/components/responses/Problem' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /documents/{documentId}:
+    get:
+      operationId: getDocument
+      parameters:
+        - name: documentId
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[a-z0-9-]{3,64}$' }
+      responses:
+        '200':
+          description: Denial letter. PDF carries a SYNTHETIC watermark.
+          headers:
+            ETag: { schema: { type: string }, description: 'Quoted SHA-256 of the bytes' }
+          content:
+            application/pdf:
+              schema: { type: string, format: binary }
+            text/html:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/Problem' }
+  /appeals:
+    post:
+      operationId: createAppeal
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: |
+            Unique per packet version, e.g. `appeal-case-100028-v1`. Keys are kept 24 hours.
+            Same key + same body replays the stored response. Same key + different body → 422.
+            Same key while the first request is in flight → 409. Missing key → 400.
+          schema: { type: string, minLength: 8, maxLength: 255 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AppealRequest' }
+            example:
+              payerClaimId: PAYER-CLM-99281
+              hospitalClaimId: HSP-CLM-100028
+              appealType: reconsideration
+              reasonCode: CO-50
+              trackingId: PAYER-CLM-99281
+              attachTo: claim
+              memberId: MEMBER-448820
+              serviceDate: '2026-08-10'
+              letterDocumentId: appeal-letter-100028
+              attachments:
+                - note-progress-031
+                - treatment-note-022
+                - order-901
+                - policy-snapshot-NST-IMG-2026-04
+              submittedBy:
+                userId: billing-approver-01
+                role: authorized-billing-user
+      responses:
+        '201':
+          description: Appeal received (first request)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AppealReceipt' }
+              example:
+                appealId: NST-APL-80126
+                status: received
+                receivedAt: '2026-09-12T18:32:00Z'
+                expectedResolutionDays: 14
+                synthetic: true
+        '200':
+          description: Replay of a completed request with the same key and body; body identical to the original 201
+          headers:
+            Idempotent-Replayed: { schema: { type: string, enum: ['true'] } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AppealReceipt' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '409': { $ref: '#/components/responses/Problem' }
+        '422': { $ref: '#/components/responses/Problem' }
+        '503': { $ref: '#/components/responses/Problem' }
+  /appeals/{appealId}:
+    get:
+      operationId: getAppeal
+      parameters:
+        - name: appealId
+          in: path
+          required: true
+          schema: { type: string, pattern: '^NST-APL-\d{5}$' }
+      responses:
+        '200':
+          description: Current appeal status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AppealStatus' }
+        '404': { $ref: '#/components/responses/Problem' }
+  /_mock/faults:
+    put:
+      operationId: setFaults
+      description: Demo/test only. Injects adapter failures (e.g. 503 on next POST /appeals).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                failNextAppealWith: { type: integer, enum: [503, 500], nullable: true }
+      responses:
+        '204': { description: Faults set }
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: Static mock token `mock-northstar-token`.
+  parameters:
+    PayerClaimId:
+      name: payerClaimId
+      in: path
+      required: true
+      schema: { type: string, pattern: '^PAYER-CLM-\d{5}$' }
+  responses:
+    Problem:
+      description: RFC 9457 problem details
+      content:
+        application/problem+json:
+          schema:
+            type: object
+            required: [type, title, status]
+            properties:
+              type: { type: string, format: uri }
+              title: { type: string }
+              status: { type: integer }
+              detail: { type: string }
+  schemas:
+    ClaimDecision:
+      type: object
+      additionalProperties: false
+      required: [payerClaimId, claimId, decision, reasonCode, reasonText, appealDeadline, allowedSubmissionChannels, letter, synthetic]
+      properties:
+        payerClaimId: { type: string }
+        claimId: { type: string }
+        decision: { type: string, enum: [denied, paid, partial] }
+        reasonCode: { type: string, pattern: '^(CO|PR|OA|PI|CR)-[A-Z0-9]{1,3}$' }
+        reasonText: { type: string }
+        appealDeadline: { type: string, format: date }
+        allowedSubmissionChannels:
+          type: array
+          items: { type: string, enum: [portal, fax, mail] }
+        letter:
+          type: object
+          additionalProperties: false
+          required: [documentId, url]
+          properties:
+            documentId: { type: string }
+            url: { type: string }
+        synthetic: { type: boolean, const: true }
+    AppealRequest:
+      type: object
+      additionalProperties: false
+      required: [payerClaimId, hospitalClaimId, appealType, reasonCode, trackingId, attachTo, memberId, serviceDate, letterDocumentId, attachments, submittedBy]
+      properties:
+        payerClaimId: { type: string }
+        hospitalClaimId: { type: string }
+        appealType: { type: string, enum: [reconsideration] }
+        reasonCode: { type: string }
+        trackingId: { type: string, description: 'CDex TrackingId; the payer claim number (835 CLP07)' }
+        attachTo: { type: string, enum: [claim], description: 'CDex AttachTo' }
+        memberId: { type: string }
+        serviceDate: { type: string, format: date }
+        letterDocumentId: { type: string }
+        attachments:
+          type: array
+          minItems: 1
+          items: { type: string }
+        submittedBy:
+          type: object
+          additionalProperties: false
+          required: [userId, role]
+          properties:
+            userId: { type: string }
+            role: { type: string, enum: [authorized-billing-user] }
+    AppealReceipt:
+      type: object
+      additionalProperties: false
+      required: [appealId, status, receivedAt, expectedResolutionDays, synthetic]
+      properties:
+        appealId: { type: string }
+        status: { type: string, enum: [received] }
+        receivedAt: { type: string, format: date-time }
+        expectedResolutionDays: { type: integer, minimum: 1 }
+        synthetic: { type: boolean, const: true }
+    AppealStatus:
+      type: object
+      additionalProperties: false
+      required: [appealId, status, updatedAt, synthetic]
+      properties:
+        appealId: { type: string }
+        status: { type: string, enum: [requested, received, in-progress, completed, rejected], description: FHIR Task status subset }
+        outcome: { type: string, enum: [overturned, upheld], nullable: true }
+        updatedAt: { type: string, format: date-time }
+        synthetic: { type: boolean, const: true }

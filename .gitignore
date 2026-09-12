@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+frontend/node_modules/
+.env
+*.db
+*.db-wal
+*.db-shm
+.claude/settings.local.json
